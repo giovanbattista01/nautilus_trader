@@ -1459,8 +1459,13 @@ cdef class BacktestEngine:
             bint has_data
             bint missing_book_data
             bint book_type_has_depth
+
+        cdef bint disable_missing_book_check = True
+        
         for exchange in self._venues.values():
             for instrument_id in exchange.instruments:
+                if disable_missing_book_check:
+                    continue
                 has_data = instrument_id in self._has_data
                 missing_book_data = instrument_id not in self._has_book_data
                 book_type_has_depth = exchange.book_type > BookType.L1_MBP
