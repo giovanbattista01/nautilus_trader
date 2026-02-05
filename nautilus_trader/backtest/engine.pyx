@@ -3815,6 +3815,7 @@ cdef class OrderMatchingEngine:
         self.oms_type = oms_type
         self.account_type = account_type
         self.market_status = MarketStatus.OPEN
+        self.optimistic = False
 
         self._settlement_prices = settlement_prices or {}
         self._instrument_has_expiration = instrument.instrument_class in ENGINE_EXPIRING_INSTRUMENT_CLASSES
@@ -5936,10 +5937,16 @@ cdef class OrderMatchingEngine:
                 original_size = level_state[0]
                 consumed = level_state[1]
 
-            # Reset consumption when book size changes (fresh data)
+            """# Reset consumption when book size changes (fresh data)
             if original_size != level_size_raw:
                 original_size = level_size_raw
-                consumed = 0
+                consumed = 0"""
+
+            # if optimistic = False we do not reset consumption on level increases...
+            if original_size != level_size_raw:
+                original_size = level_size_raw
+                if level_size_raw < original_size or self.optimistic:
+                    consumed = 0
 
             available = original_size - consumed if original_size > consumed else 0
             if available == 0:
