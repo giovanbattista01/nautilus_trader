@@ -164,6 +164,7 @@ class BacktestVenueConfig(NautilusConfig, frozen=True):
     bar_adaptive_high_low_ordering: bool = False
     trade_execution: bool = True
     liquidity_consumption: bool = False
+    optimistic: bool = False
     queue_position: bool = False
     allow_cash_borrowing: bool = False
     frozen_account: bool = False

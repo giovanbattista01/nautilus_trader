@@ -516,6 +516,7 @@ cdef class BacktestEngine:
         bar_adaptive_high_low_ordering: bool = False,
         trade_execution: bool = True,
         liquidity_consumption: bool = False,
+        optimistic: bool = False,
         queue_position: bool = False,
         allow_cash_borrowing: bool = False,
         frozen_account: bool = False,
@@ -675,6 +676,7 @@ cdef class BacktestEngine:
             bar_adaptive_high_low_ordering=bar_adaptive_high_low_ordering,
             trade_execution=trade_execution,
             liquidity_consumption=liquidity_consumption,
+            optimistic=optimistic,
             queue_position=queue_position,
             price_protection_points=price_protection_points,
             settlement_prices=settlement_prices,
@@ -2703,6 +2705,7 @@ cdef class SimulatedExchange:
         bint bar_adaptive_high_low_ordering = False,
         bint trade_execution = True,
         bint liquidity_consumption = False,
+        bint optimistic = False,
         bint queue_position = False,
         price_protection_points=None,
         settlement_prices: dict[InstrumentId, float] | None = None,
@@ -2751,6 +2754,8 @@ cdef class SimulatedExchange:
         self.bar_adaptive_high_low_ordering = bar_adaptive_high_low_ordering
         self.trade_execution = trade_execution
         self.liquidity_consumption = liquidity_consumption
+        self._log.info(f"Optimistic order processing enabled: {optimistic}")
+        self.optimistic = optimistic
         self.queue_position = queue_position
         self.price_protection_points = price_protection_points if price_protection_points is not None else 0
 
@@ -2917,6 +2922,7 @@ cdef class SimulatedExchange:
             bar_adaptive_high_low_ordering=self.bar_adaptive_high_low_ordering,
             trade_execution=self.trade_execution,
             liquidity_consumption=self.liquidity_consumption,
+            optimistic= self.optimistic,
             queue_position=self.queue_position,
             price_protection_points=self.price_protection_points,
             settlement_prices=self.settlement_prices,
@@ -3799,6 +3805,7 @@ cdef class OrderMatchingEngine:
         bint bar_adaptive_high_low_ordering = False,
         bint trade_execution = True,
         bint liquidity_consumption = False,
+        bint optimistic = False,
         bint queue_position = False,
         price_protection_points=None,
         settlement_prices: dict[InstrumentId, float] | None = None,
@@ -3815,7 +3822,6 @@ cdef class OrderMatchingEngine:
         self.oms_type = oms_type
         self.account_type = account_type
         self.market_status = MarketStatus.OPEN
-        self.optimistic = False
 
         self._settlement_prices = settlement_prices or {}
         self._instrument_has_expiration = instrument.instrument_class in ENGINE_EXPIRING_INSTRUMENT_CLASSES
@@ -3833,6 +3839,7 @@ cdef class OrderMatchingEngine:
         self._bar_adaptive_high_low_ordering = bar_adaptive_high_low_ordering
         self._trade_execution = trade_execution
         self._liquidity_consumption = liquidity_consumption
+        self.optimistic = optimistic
         self._queue_position = queue_position
         self._price_protection_points = price_protection_points if price_protection_points is not None else 0
 

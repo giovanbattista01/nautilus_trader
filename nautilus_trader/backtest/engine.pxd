@@ -265,6 +265,8 @@ cdef class SimulatedExchange:
     """If trades should be processed by the matching engine(s) (and move the market).\n\n:returns: `bool`"""
     cdef readonly bint liquidity_consumption
     """If liquidity consumption is tracked per price level.\n\n:returns: `bool`"""
+    cdef readonly bint optimistic
+    """If optimistic order processing is enabled.\n\n:returns: `bool`"""
     cdef readonly bint queue_position
     """If queue position tracking is enabled for limit orders.\n\n:returns: `bool`"""
     cdef readonly uint32_t price_protection_points
@@ -371,6 +373,7 @@ cdef class OrderMatchingEngine:
     cdef bint _bar_adaptive_high_low_ordering
     cdef bint _trade_execution
     cdef bint _liquidity_consumption
+    cdef bint optimistic
     cdef bint _queue_position
     cdef uint32_t _price_protection_points
     cdef dict[InstrumentId, float] _settlement_prices
