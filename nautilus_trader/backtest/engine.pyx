@@ -5535,6 +5535,66 @@ cdef class OrderMatchingEngine:
             if isinstance(self.instrument, (OptionContract, CryptoOption)):
                 self._process_option_expiry(timestamp_ns)
             else:
+                cdef object info = self.instrument.info
+                
+                # ---- Sirius custom logic ----
+                if info is not None and info['product'] == 'QH':
+                    cdef InstrumentId fh_id
+                    cdef Instrument fh_inst
+                    cdef Position p
+                    cdef double mw_qh = 0.0
+                    cdef double mw_fh = 0.0
+                    cdef double q = 0.0
+                    cdef double net_mw = 0.0
+                    cdef double adj_mw = 0.0
+                    cdef object px
+                    cdef double px_f = 0.0
+                    
+                    fh_id = InstrumentId.from_str(<str>info["parent_fh_id"])
+
+                    # Total signed MW position of the QH product
+                    for p in self.cache.positions_open(None, self.instrument.id):
+                        q = p.quantity.as_double()
+                        if p.side == PositionSide.SHORT:
+                            q = -q
+                        mw_qh += q * self.instrument.multiplier.as_double()
+
+                     # Total signed MW position of the FH product
+                    fh_inst = self.cache.instrument(fh_id)
+                    if fh_inst is None:
+                        self._log.error(f"Cannot find FH instrument {fh_id} for QH expiration")
+                    else:
+                        for p in self.cache.positions_open(None, fh_id):
+                            q = p.quantity.as_double()
+                            if p.side == PositionSide.SHORT:
+                                q = -q
+                            mw_fh += q * fh_inst.multiplier.as_double()
+
+                    net_mw = mw_qh + (0.25 * mw_fh) # total internal position (QH + FH)
+
+                    adj_mw = <double>float(info.get("imbalance_qty", 0.0))
+                    net_mw += adj_mw
+
+
+                    if net_mw >= 0.0:
+                        px = info.get("imbalance_long_px", None)
+                    else:
+                        px = info.get("imbalance_short_px", None)
+
+                    if px is not None:
+                        px_f = <double>float(px)
+
+                        if self._settlement_prices is None:
+                            self._settlement_prices = {}
+
+                        # Set settlement price for THIS QH instrument
+                        self._settlement_prices[self.instrument.id] = px_f
+
+                        # Accumulate 1/4 into FH instrument (average over 4 QHs)
+                        self._settlement_prices[fh_id] = <double>float(self._settlement_prices.get(fh_id, 0.0)) + (px_f * 0.25)
+
+
+
                 for position in self.cache.positions_open(None, self.instrument.id):
                     order = MarketOrder(
                         trader_id=position.trader_id,
