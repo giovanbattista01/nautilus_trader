@@ -5520,6 +5520,19 @@ cdef class OrderMatchingEngine:
 
     cpdef void check_instrument_expiration(self, uint64_t timestamp_ns):
         """Run instrument expiration at timestamp_ns (option exercise/expiry or futures close)."""
+
+        cdef InstrumentId fh_id
+        cdef Instrument fh_inst
+        cdef Position p
+        cdef double mw_qh = 0.0
+        cdef double mw_fh = 0.0
+        cdef double q = 0.0
+        cdef double net_mw = 0.0
+        cdef double adj_mw = 0.0
+        cdef object px
+        cdef double px_f = 0.0
+        cdef object info
+
         if self._expiration_processed:
             return
 
@@ -5535,20 +5548,12 @@ cdef class OrderMatchingEngine:
             if isinstance(self.instrument, (OptionContract, CryptoOption)):
                 self._process_option_expiry(timestamp_ns)
             else:
-                cdef object info = self.instrument.info
+                info = self.instrument.info
                 
                 # ---- Sirius custom logic ----
                 if info is not None and info['product'] == 'QH':
-                    cdef InstrumentId fh_id
-                    cdef Instrument fh_inst
-                    cdef Position p
-                    cdef double mw_qh = 0.0
-                    cdef double mw_fh = 0.0
-                    cdef double q = 0.0
-                    cdef double net_mw = 0.0
-                    cdef double adj_mw = 0.0
-                    cdef object px
-                    cdef double px_f = 0.0
+                    self._log.info(f"Processing custom QH expiration logic for {self.instrument.id}")
+                    
                     
                     fh_id = InstrumentId.from_str(<str>info["parent_fh_id"])
 
@@ -5592,6 +5597,7 @@ cdef class OrderMatchingEngine:
 
                         # Accumulate 1/4 into FH instrument (average over 4 QHs)
                         self._settlement_prices[fh_id] = <double>float(self._settlement_prices.get(fh_id, 0.0)) + (px_f * 0.25)
+                        self._log.info(f"Adding {px_f * 0.25} to FH settlement price for {fh_id}, total so far: {self._settlement_prices[fh_id]}")
 
 
 
