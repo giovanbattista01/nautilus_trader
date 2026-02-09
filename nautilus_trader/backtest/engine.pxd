@@ -605,3 +605,8 @@ cdef class OrderMatchingEngine:
         Money commission,
         LiquiditySide liquidity_side
     )
+
+# -- CUSTOM -----------------------------------------------------------------------------
+    cdef void _minlog(
+        self, str tag, str msg
+    )

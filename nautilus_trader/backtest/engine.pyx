@@ -3892,6 +3892,13 @@ cdef class OrderMatchingEngine:
             f"raw_id={self.raw_id})"
         )
 
+
+    ### helper function for custom logging ###
+
+    cdef inline void _minlog(self, str tag, str msg):
+        self._log.info(f"[MINLOG] {tag} {msg}")
+
+
     cpdef void reset(self):
         self._log.debug(f"Resetting OrderMatchingEngine {self.instrument.id}")
 
@@ -5555,6 +5562,7 @@ cdef class OrderMatchingEngine:
         cdef object s
         cdef InstrumentId qh_id
         cdef Instrument qh_inst
+        cdef double settle_px
 
         if self._expiration_processed:
             return
@@ -5591,6 +5599,8 @@ cdef class OrderMatchingEngine:
         if (self._instrument_has_expiration and timestamp_ns >= self.instrument.expiration_ns) or self._instrument_close is not None:
             self._expiration_processed = True
             self._log.info(f"{self.instrument.id} reached expiration")
+
+            self._minlog("EXPIRE", f"instrument={self.instrument.id} ts={timestamp_ns}")
 
             # Cancel all open orders
             for order in self.get_open_orders():
@@ -5651,6 +5661,15 @@ cdef class OrderMatchingEngine:
                     if px is not None:
                         px_f = <double>float(px)
 
+                        self._minlog(
+                            "SETTLE_QH",
+                            f"qh={self.instrument.id} fh={fh_id} "
+                            f"mw_qh={mw_qh} mw_fh={mw_fh} net_mw={net_mw} adj={adj_mw} "
+                            f"px={px_f} "
+                            f"fh_add={px_f*0.25} fh_price_now={self._settlement_prices.get(fh_id, 0.0)}"
+                        )
+
+
                         if self._settlement_prices is None:
                             self._settlement_prices = {}
 
@@ -5661,9 +5680,29 @@ cdef class OrderMatchingEngine:
                         self._settlement_prices[fh_id] = <double>float(self._settlement_prices.get(fh_id, 0.0)) + (px_f * 0.25)
                         self._log.info(f"Adding {px_f * 0.25} to FH settlement price for {fh_id}, total so far: {self._settlement_prices[fh_id]}")
 
+                        self._minlog(
+                            "SETTLE_ACC",
+                            f"fh={fh_id} fh_price_new={self._settlement_prices[fh_id]}"
+                        )
+
 
 
                 for position in self.cache.positions_open(None, self.instrument.id):
+
+
+                    self._minlog(
+                        "SETTLE_POS",
+                        "instrument=%s pos_id=%s trader=%s strategy=%s side=%s qty=%s"
+                        % (
+                            self.instrument.id,
+                            position.id,
+                            position.trader_id,
+                            position.strategy_id,
+                            position.side,
+                            position.quantity,
+                        ),
+                    )
+
                     order = MarketOrder(
                         trader_id=position.trader_id,
                         strategy_id=position.strategy_id,
@@ -5678,6 +5717,22 @@ cdef class OrderMatchingEngine:
                     )
                     self.cache.add_order(order, position_id=position.id)
                     if self._settlement_prices and self.instrument.id in self._settlement_prices:
+
+                        settle_px = <double>self._settlement_prices[self.instrument.id]
+
+                        self._minlog(
+                            "SETTLE_FILL",
+                            "instrument=%s cid=%s pos_id=%s settle_px=%.10f qty=%s liq=TAKER"
+                            % (
+                                self.instrument.id,
+                                order.client_order_id,
+                                position.id,
+                                settle_px,
+                                position.quantity,
+                            ),
+                        )
+
+
                         self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
                         settlement_price = Price(
                             self._settlement_prices[self.instrument.id],
@@ -5691,6 +5746,18 @@ cdef class OrderMatchingEngine:
                             position=position,
                         )
                     else:
+                        self._minlog(
+                            "SETTLE_MKT",
+                            "instrument=%s cid=%s pos_id=%s qty=%s reason=no_settlement_price"
+                            % (
+                                self.instrument.id,
+                                order.client_order_id,
+                                position.id,
+                                position.quantity,
+                            ),
+                        )
+
+
                         self.fill_market_order(order)
 
             self._instrument_close = None
