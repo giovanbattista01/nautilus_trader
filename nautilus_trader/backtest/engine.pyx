@@ -4707,6 +4707,10 @@ cdef class OrderMatchingEngine:
     # -- TRADING COMMANDS -----------------------------------------------------------------------------
 
     cpdef void process_order(self, Order order, AccountId account_id):
+
+        cdef object info
+        cdef uint64_t last_tradable_ns
+
         if self._core.order_exists(order.client_order_id):
             return  # Already processed
 
@@ -4716,6 +4720,21 @@ cdef class OrderMatchingEngine:
         cdef uint64_t now_ns
         if self._instrument_has_expiration:
             now_ns = self._clock.timestamp_ns()
+
+            ### custom logic : we reject orders after last tradable time
+
+            info = self.instrument.info
+            if info is not None and "last_tradable_ns" in info:
+                last_tradable_ns = <uint64_t><long long>info["last_tradable_ns"]
+                self._log.debug(f"Contract {self.instrument.id} last tradable at {format_iso8601(unix_nanos_to_dt(last_tradable_ns))}, now is {format_iso8601(unix_nanos_to_dt(now_ns))}")
+                if now_ns >= last_tradable_ns:
+                    self._generate_order_rejected(
+                        order,
+                        f"Contract {self.instrument.id} is no longer tradable, "
+                        f"last tradable {format_iso8601(unix_nanos_to_dt(last_tradable_ns))}"
+                    )
+                    return
+
 
             if now_ns < self.instrument.activation_ns:
                 self._generate_order_rejected(
@@ -5532,9 +5551,42 @@ cdef class OrderMatchingEngine:
         cdef object px
         cdef double px_f = 0.0
         cdef object info
+        cdef object child_ids
+        cdef object s
+        cdef InstrumentId qh_id
+        cdef Instrument qh_inst
 
         if self._expiration_processed:
             return
+
+        info = self.instrument.info
+    
+        if info is not None and info.get("product") == "FH":
+            child_ids = info.get("child_qh_ids", None)
+            if child_ids is not None:
+
+                for s in child_ids:
+                    qh_id = InstrumentId.from_str(<str>s)
+                    qh_inst = self.cache.instrument(qh_id)
+                    if qh_inst is None:
+                        self._log.warn(f"FH {self.instrument.id} missing child QH instrument {qh_id}; delaying expiry")
+                        return
+
+                    # If any child QH has NOT yet expired at this timestamp, delay FH expiry
+                    if timestamp_ns <= qh_inst.expiration_ns:
+                        return
+
+        elif info.get("product") == "FH":
+            self._log.info(f"FH {self.instrument.id} has all child QHs expired, processing FH expiration")
+            child_ids = info.get("child_qh_ids", None)
+            if child_ids is not None:
+                for s in child_ids:
+                    qh_id = InstrumentId.from_str(<str>s)
+                    qh_inst = self.cache.instrument(qh_id)
+                    if qh_inst is None:
+                        self._log.info(f"QH {qh_id} instrument expiration : {qh_inst.expiration_ns}, current timestamp: {timestamp_ns}")
+
+            
 
         if (self._instrument_has_expiration and timestamp_ns >= self.instrument.expiration_ns) or self._instrument_close is not None:
             self._expiration_processed = True
@@ -5564,6 +5616,8 @@ cdef class OrderMatchingEngine:
                             q = -q
                         mw_qh += q * self.instrument.multiplier.as_double()
 
+                    self._log.info(f"Total signed MW position for QH {self.instrument.id}: {mw_qh}")
+
                      # Total signed MW position of the FH product
                     fh_inst = self.cache.instrument(fh_id)
                     if fh_inst is None:
@@ -5575,16 +5629,24 @@ cdef class OrderMatchingEngine:
                                 q = -q
                             mw_fh += q * fh_inst.multiplier.as_double()
 
+                    self._log.info(f"Total signed MW position for FH {fh_id}: {mw_fh}")
+
                     net_mw = mw_qh + (0.25 * mw_fh) # total internal position (QH + FH)
+
+                    self._log.info(f"Net MW position for {self.instrument.id} at expiration: {net_mw} (mw_qh + 0.25 * mw_fh) ")
 
                     adj_mw = <double>float(info.get("imbalance_qty", 0.0))
                     net_mw += adj_mw
 
+                    self._log.info(f"Adjusted net MW position for {self.instrument.id} at expiration: {net_mw} (net_mw + imbalance_qty adj of {adj_mw})")
+
 
                     if net_mw >= 0.0:
                         px = info.get("imbalance_long_px", None)
+                        self._log.info(f"Using imbalance_long_px for settlement price since net_mw >= 0: {px}")
                     else:
                         px = info.get("imbalance_short_px", None)
+                        self._log.info(f"Using imbalance_short_px for settlement price since net_mw < 0: {px}")
 
                     if px is not None:
                         px_f = <double>float(px)
