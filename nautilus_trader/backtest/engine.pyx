@@ -6071,6 +6071,13 @@ cdef class OrderMatchingEngine:
             Quantity adjusted_qty
             int fill_idx
 
+            double SCALE
+            double original_size_f
+            double max_qty_f
+            double remaining_f
+            double level_size_f
+            double consumed_f
+
         # Aggregated fill quantities per price (computed on-demand for missing levels)
         cdef dict[PriceRaw, QuantityRaw] fill_totals = None
 
@@ -6145,10 +6152,30 @@ cdef class OrderMatchingEngine:
                 consumed = 0"""
 
             # if optimistic = False we do not reset consumption on level increases...
+
+
+            SCALE = 1e16
+            original_size_f = original_size / SCALE
+            max_qty_f = max_qty_raw / SCALE
+            remaining_f = remaining_qty / SCALE
+            level_size_f = level_size_raw / SCALE
+            consumed_f = consumed / SCALE
+
+            self._minlog(
+                "LIQ_CONSUMP",
+                f"applying custom logic -> resetting if new < old : price={book_price} new={level_size_f} old={original_size_f} consumed={consumed_f} remaining_qty={remaining_f} "
+            )
+
             if original_size != level_size_raw:
                 original_size = level_size_raw
                 if level_size_raw < original_size or self.optimistic:
                     consumed = 0
+                    consumed_f = 0
+                    self._minlog(
+                        "LIQ_CONSUMP",
+                        f"resetting consumption due to level size change: price={book_price} new={level_size_f} old={original_size_f} consumed reset to 0 remaining_qty={remaining_f} "
+                    )
+
 
             available = original_size - consumed if original_size > consumed else 0
             if available == 0:
