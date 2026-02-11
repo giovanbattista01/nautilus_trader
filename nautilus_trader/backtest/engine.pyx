@@ -3892,6 +3892,13 @@ cdef class OrderMatchingEngine:
             f"raw_id={self.raw_id})"
         )
 
+
+    ### helper function for custom logging ###
+
+    cdef inline void _minlog(self, str tag, str msg):
+        self._log.info(f"[MINLOG] {tag} {msg}")
+
+
     cpdef void reset(self):
         self._log.debug(f"Resetting OrderMatchingEngine {self.instrument.id}")
 
@@ -4707,6 +4714,10 @@ cdef class OrderMatchingEngine:
     # -- TRADING COMMANDS -----------------------------------------------------------------------------
 
     cpdef void process_order(self, Order order, AccountId account_id):
+
+        cdef object info
+        cdef uint64_t last_tradable_ns
+
         if self._core.order_exists(order.client_order_id):
             return  # Already processed
 
@@ -4716,6 +4727,21 @@ cdef class OrderMatchingEngine:
         cdef uint64_t now_ns
         if self._instrument_has_expiration:
             now_ns = self._clock.timestamp_ns()
+
+            ### custom logic : we reject orders after last tradable time
+
+            info = self.instrument.info
+            if info is not None and "last_tradable_ns" in info:
+                last_tradable_ns = <uint64_t><long long>info["last_tradable_ns"]
+                self._log.debug(f"Contract {self.instrument.id} last tradable at {format_iso8601(unix_nanos_to_dt(last_tradable_ns))}, now is {format_iso8601(unix_nanos_to_dt(now_ns))}")
+                if now_ns >= last_tradable_ns:
+                    self._generate_order_rejected(
+                        order,
+                        f"Contract {self.instrument.id} is no longer tradable, "
+                        f"last tradable {format_iso8601(unix_nanos_to_dt(last_tradable_ns))}"
+                    )
+                    return
+
 
             if now_ns < self.instrument.activation_ns:
                 self._generate_order_rejected(
@@ -5520,12 +5546,61 @@ cdef class OrderMatchingEngine:
 
     cpdef void check_instrument_expiration(self, uint64_t timestamp_ns):
         """Run instrument expiration at timestamp_ns (option exercise/expiry or futures close)."""
+
+        cdef InstrumentId fh_id
+        cdef Instrument fh_inst
+        cdef Position p
+        cdef double mw_qh = 0.0
+        cdef double mw_fh = 0.0
+        cdef double q = 0.0
+        cdef double net_mw = 0.0
+        cdef double adj_mw = 0.0
+        cdef object px
+        cdef double px_f = 0.0
+        cdef object info
+        cdef object child_ids
+        cdef object s
+        cdef InstrumentId qh_id
+        cdef Instrument qh_inst
+        cdef double settle_px
+
         if self._expiration_processed:
             return
+
+        info = self.instrument.info
+    
+        if info is not None and info.get("product") == "FH":
+            child_ids = info.get("child_qh_ids", None)
+            if child_ids is not None:
+
+                for s in child_ids:
+                    qh_id = InstrumentId.from_str(<str>s)
+                    qh_inst = self.cache.instrument(qh_id)
+                    if qh_inst is None:
+                        self._log.warn(f"FH {self.instrument.id} missing child QH instrument {qh_id}; delaying expiry")
+                        return
+
+                    # If any child QH has NOT yet expired at this timestamp, delay FH expiry
+                    if timestamp_ns <= qh_inst.expiration_ns:
+                        return
+
+        elif info.get("product") == "FH":
+            self._log.info(f"FH {self.instrument.id} has all child QHs expired, processing FH expiration")
+            child_ids = info.get("child_qh_ids", None)
+            if child_ids is not None:
+                for s in child_ids:
+                    qh_id = InstrumentId.from_str(<str>s)
+                    qh_inst = self.cache.instrument(qh_id)
+                    if qh_inst is None:
+                        self._log.info(f"QH {qh_id} instrument expiration : {qh_inst.expiration_ns}, current timestamp: {timestamp_ns}")
+
+            
 
         if (self._instrument_has_expiration and timestamp_ns >= self.instrument.expiration_ns) or self._instrument_close is not None:
             self._expiration_processed = True
             self._log.info(f"{self.instrument.id} reached expiration")
+
+            self._minlog("EXPIRE", f"instrument={self.instrument.id} ts={timestamp_ns}")
 
             # Cancel all open orders
             for order in self.get_open_orders():
@@ -5535,7 +5610,99 @@ cdef class OrderMatchingEngine:
             if isinstance(self.instrument, (OptionContract, CryptoOption)):
                 self._process_option_expiry(timestamp_ns)
             else:
+                info = self.instrument.info
+                
+                # ---- Sirius custom logic ----
+                if info is not None and info['product'] == 'QH':
+                    self._log.info(f"Processing custom QH expiration logic for {self.instrument.id}")
+                    
+                    
+                    fh_id = InstrumentId.from_str(<str>info["parent_fh_id"])
+
+                    # Total signed MW position of the QH product
+                    for p in self.cache.positions_open(None, self.instrument.id):
+                        q = p.quantity.as_double()
+                        if p.side == PositionSide.SHORT:
+                            q = -q
+                        mw_qh += q * self.instrument.multiplier.as_double()
+
+                    self._log.info(f"Total signed MW position for QH {self.instrument.id}: {mw_qh}")
+
+                     # Total signed MW position of the FH product
+                    fh_inst = self.cache.instrument(fh_id)
+                    if fh_inst is None:
+                        self._log.error(f"Cannot find FH instrument {fh_id} for QH expiration")
+                    else:
+                        for p in self.cache.positions_open(None, fh_id):
+                            q = p.quantity.as_double()
+                            if p.side == PositionSide.SHORT:
+                                q = -q
+                            mw_fh += q * fh_inst.multiplier.as_double()
+
+                    self._log.info(f"Total signed MW position for FH {fh_id}: {mw_fh}")
+
+                    net_mw = mw_qh + (0.25 * mw_fh) # total internal position (QH + FH)
+
+                    self._log.info(f"Net MW position for {self.instrument.id} at expiration: {net_mw} (mw_qh + 0.25 * mw_fh) ")
+
+                    adj_mw = <double>float(info.get("imbalance_qty", 0.0))
+                    net_mw += adj_mw
+
+                    self._log.info(f"Adjusted net MW position for {self.instrument.id} at expiration: {net_mw} (net_mw + imbalance_qty adj of {adj_mw})")
+
+
+                    if net_mw >= 0.0:
+                        px = info.get("imbalance_long_px", None)
+                        self._log.info(f"Using imbalance_long_px for settlement price since net_mw >= 0: {px}")
+                    else:
+                        px = info.get("imbalance_short_px", None)
+                        self._log.info(f"Using imbalance_short_px for settlement price since net_mw < 0: {px}")
+
+                    if px is not None:
+                        px_f = <double>float(px)
+
+                        self._minlog(
+                            "SETTLE_QH",
+                            f"qh={self.instrument.id} fh={fh_id} "
+                            f"mw_qh={mw_qh} mw_fh={mw_fh} net_mw={net_mw} adj={adj_mw} "
+                            f"px={px_f} "
+                            f"fh_add={px_f*0.25} fh_price_now={self._settlement_prices.get(fh_id, 0.0)}"
+                        )
+
+
+                        if self._settlement_prices is None:
+                            self._settlement_prices = {}
+
+                        # Set settlement price for THIS QH instrument
+                        self._settlement_prices[self.instrument.id] = px_f
+
+                        # Accumulate 1/4 into FH instrument (average over 4 QHs)
+                        self._settlement_prices[fh_id] = <double>float(self._settlement_prices.get(fh_id, 0.0)) + (px_f * 0.25)
+                        self._log.info(f"Adding {px_f * 0.25} to FH settlement price for {fh_id}, total so far: {self._settlement_prices[fh_id]}")
+
+                        self._minlog(
+                            "SETTLE_ACC",
+                            f"fh={fh_id} fh_price_new={self._settlement_prices[fh_id]}"
+                        )
+
+
+
                 for position in self.cache.positions_open(None, self.instrument.id):
+
+
+                    self._minlog(
+                        "SETTLE_POS",
+                        "instrument=%s pos_id=%s trader=%s strategy=%s side=%s qty=%s"
+                        % (
+                            self.instrument.id,
+                            position.id,
+                            position.trader_id,
+                            position.strategy_id,
+                            position.side,
+                            position.quantity,
+                        ),
+                    )
+
                     order = MarketOrder(
                         trader_id=position.trader_id,
                         strategy_id=position.strategy_id,
@@ -5550,6 +5717,22 @@ cdef class OrderMatchingEngine:
                     )
                     self.cache.add_order(order, position_id=position.id)
                     if self._settlement_prices and self.instrument.id in self._settlement_prices:
+
+                        settle_px = <double>self._settlement_prices[self.instrument.id]
+
+                        self._minlog(
+                            "SETTLE_FILL",
+                            "instrument=%s cid=%s pos_id=%s settle_px=%.10f qty=%s liq=TAKER"
+                            % (
+                                self.instrument.id,
+                                order.client_order_id,
+                                position.id,
+                                settle_px,
+                                position.quantity,
+                            ),
+                        )
+
+
                         self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
                         settlement_price = Price(
                             self._settlement_prices[self.instrument.id],
@@ -5563,6 +5746,18 @@ cdef class OrderMatchingEngine:
                             position=position,
                         )
                     else:
+                        self._minlog(
+                            "SETTLE_MKT",
+                            "instrument=%s cid=%s pos_id=%s qty=%s reason=no_settlement_price"
+                            % (
+                                self.instrument.id,
+                                order.client_order_id,
+                                position.id,
+                                position.quantity,
+                            ),
+                        )
+
+
                         self.fill_market_order(order)
 
             self._instrument_close = None
@@ -5876,6 +6071,13 @@ cdef class OrderMatchingEngine:
             Quantity adjusted_qty
             int fill_idx
 
+            double SCALE
+            double original_size_f
+            double max_qty_f
+            double remaining_f
+            double level_size_f
+            double consumed_f
+
         # Aggregated fill quantities per price (computed on-demand for missing levels)
         cdef dict[PriceRaw, QuantityRaw] fill_totals = None
 
@@ -5950,10 +6152,30 @@ cdef class OrderMatchingEngine:
                 consumed = 0"""
 
             # if optimistic = False we do not reset consumption on level increases...
+
+
+            SCALE = 1e16
+            original_size_f = original_size / SCALE
+            max_qty_f = max_qty_raw / SCALE
+            remaining_f = remaining_qty / SCALE
+            level_size_f = level_size_raw / SCALE
+            consumed_f = consumed / SCALE
+
+            self._minlog(
+                "LIQ_CONSUMP",
+                f"applying custom logic -> resetting if new < old : price={book_price} new={level_size_f} old={original_size_f} consumed={consumed_f} remaining_qty={remaining_f} "
+            )
+
             if original_size != level_size_raw:
                 original_size = level_size_raw
                 if level_size_raw < original_size or self.optimistic:
                     consumed = 0
+                    consumed_f = 0
+                    self._minlog(
+                        "LIQ_CONSUMP",
+                        f"resetting consumption due to level size change: price={book_price} new={level_size_f} old={original_size_f} consumed reset to 0 remaining_qty={remaining_f} "
+                    )
+
 
             available = original_size - consumed if original_size > consumed else 0
             if available == 0:
