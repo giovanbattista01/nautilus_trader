@@ -3898,6 +3898,37 @@ cdef class OrderMatchingEngine:
     cdef inline void _minlog(self, str tag, str msg):
         self._log.info(f"[MINLOG] {tag} {msg}")
 
+    cdef void update_user_consumption(self):
+        #self._log.info(f"Updating consumption for {self.instrument.id}")
+        cdef Instrument inst = self.instrument 
+        if inst is None:
+            return
+
+        cdef dict info = inst.info
+        if info is None:
+            info = {}
+            inst.info = info
+
+        cdef dict cons = info.get("consumption")
+        if cons is None:
+            self._log.info(f"Initializing consumption tracking for {self.instrument.id}")
+            cons = {"ask": {}, "bid": {}, "ver": 0, "ts": 0}
+            info["consumption"] = cons
+
+        cdef dict ask_out = cons["ask"]
+        cdef dict bid_out = cons["bid"]
+
+        # Reuse dict objects: clear then update
+        ask_out.clear()
+        bid_out.clear()
+
+        # Copy internal dicts (price_raw -> level_state)
+        ask_out.update(self._ask_consumption)
+        bid_out.update(self._bid_consumption)
+
+        cons["ver"] = cons.get("ver", 0) + 1
+
+
 
     cpdef void reset(self):
         self._log.debug(f"Resetting OrderMatchingEngine {self.instrument.id}")
@@ -4079,6 +4110,7 @@ cdef class OrderMatchingEngine:
         ):
             self._bid_consumption.clear()
             self._ask_consumption.clear()
+            self.update_user_consumption()
 
         # Reset queue positions on snapshot/CLEAR (stale depth no longer exists)
         if self._queue_position and (
@@ -4094,6 +4126,7 @@ cdef class OrderMatchingEngine:
                 self._ask_consumption.pop(delta._mem.order.price.raw, None)
             elif delta._mem.order.side == OrderSide.BUY:
                 self._bid_consumption.pop(delta._mem.order.price.raw, None)
+            self.update_user_consumption()
 
         if self._queue_position and delta._mem.action == BookAction.DELETE:
             self._clear_queue_on_delete(delta._mem.order.price.raw, delta._mem.order.side)
@@ -4150,6 +4183,7 @@ cdef class OrderMatchingEngine:
                     self._ask_consumption.pop(delta._mem.order.price.raw, None)
                 elif delta._mem.order.side == OrderSide.BUY:
                     self._bid_consumption.pop(delta._mem.order.price.raw, None)
+                self.update_user_consumption()
 
             if self._queue_position and delta._mem.action == BookAction.DELETE:
                 self._clear_queue_on_delete(delta._mem.order.price.raw, delta._mem.order.side)
@@ -4223,6 +4257,8 @@ cdef class OrderMatchingEngine:
         if self._liquidity_consumption and (depth._mem.flags & 32):
             self._bid_consumption.clear()
             self._ask_consumption.clear()
+
+        self.update_user_consumption()
 
         # Reset queue positions on snapshot (stale depth no longer exists)
         if self._queue_position and (depth._mem.flags & 32):
@@ -6200,6 +6236,7 @@ cdef class OrderMatchingEngine:
             adjusted_qty = Quantity.from_raw_c(adjusted_qty_raw, qty._mem.precision)
             adjusted_fills.append((price, adjusted_qty))
 
+        self.update_user_consumption()
         return adjusted_fills
 
     cpdef list[tuple[Price, Quantity]] determine_market_price_and_volume(self, Order order):

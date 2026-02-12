@@ -610,3 +610,6 @@ cdef class OrderMatchingEngine:
     cdef void _minlog(
         self, str tag, str msg
     )
+    cdef void update_user_consumption(
+        self
+    )
