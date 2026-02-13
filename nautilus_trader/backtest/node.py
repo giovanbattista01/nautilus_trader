@@ -1,3 +1,13 @@
+# Debug dispose logger for this file only
+import logging
+_dispose_logger = logging.getLogger("debug_dispose")
+_dispose_logger.setLevel(logging.DEBUG)
+if not _dispose_logger.handlers:
+    _fh = logging.FileHandler("/home/azureuser/trading-workspace/custom_nautilus/debug_dispose.log")
+    _fh.setLevel(logging.DEBUG)
+    _formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    _fh.setFormatter(_formatter)
+    _dispose_logger.addHandler(_fh)
 # -------------------------------------------------------------------------------------------------
 #  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
@@ -160,8 +170,10 @@ class BacktestNode:
         return list(self._engines.values())
 
     def dispose(self):
+        _dispose_logger.info("Disposing all engines in BacktestNode...")
         for engine in self.get_engines():
             if not engine.trader.is_disposed:
+                _dispose_logger.info(f"Disposing engine for run config ID {engine.run_config_id}...")
                 engine.dispose()
 
     def _validate_configs(self, configs: list[BacktestRunConfig]) -> None:  # noqa: C901
@@ -244,18 +256,33 @@ class BacktestNode:
         any type of information.
 
         """
+        _dispose_logger.info("Building backtest enginess...")
+
         for config in self._configs.values():
+            _dispose_logger.info(f"Building engine for config ID {config.id}...")
             try:
                 if config.id in self._engines:
                     # Only create an engine if one doesn't already exist for this config
+                    _dispose_logger.info(f"Engine already exists for config ID {config.id}, skipping creation.")
+                    _dispose_logger.info(f"Existing engine: {self._engines[config.id]}")
                     continue
 
                 self._create_engine(config.id)
+                _dispose_logger.info(f"Successfully built engine for config ID {config.id}.")
+                _dispose_logger.info(f"Exchanges in Engine: {self._engines[config.id].get_exchanges()}")
+                _dispose_logger.info(f"OrderMatching in Engine: {self._engines[config.id].get_exchanges()[0].get_matching_engines()}")
+                instr_id = InstrumentId.from_str('POWER_SICI_FH_20260120_MTU12.XBID')
+                _dispose_logger.info(f"Picking one specific ordermatchingengine : {self._engines[config.id].get_exchanges()[0].get_matching_engine(instr_id)}")
             except Exception as e:
+                _dispose_logger.error(f"Error building engine for config ID {config.id}: {e}")
                 if config.raise_exception:
                     raise e
 
                 self.log_backtest_exception(e, config)
+
+        _dispose_logger.info("Finished building backtest engines.")
+        _dispose_logger.info(f"Engines created: {len(self._engines)}")
+        _dispose_logger.info(f"Engine IDs: {list(self._engines.keys())}")
 
     def setup_download_engine(
         self,
@@ -518,6 +545,7 @@ class BacktestNode:
 
         if dispose_on_completion:
             # Drop data and all state
+            _dispose_logger.info(f"Disposing engine for run config ID {run_config_id}...")
             engine.dispose()
         else:
             # Drop data

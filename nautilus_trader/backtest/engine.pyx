@@ -487,6 +487,17 @@ cdef class BacktestEngine:
         """
         return list(self._venues)
 
+    def get_exchanges(self) -> list[SimulatedExchange]:
+        """
+        Return the exchanges contained within the engine.
+
+        Returns
+        -------
+        list[SimulatedExchange]
+
+        """
+        return list(self._venues.values())
+
     def add_venue(
         self,
         venue: Venue,
@@ -3884,6 +3895,9 @@ cdef class OrderMatchingEngine:
         self._order_count = 0
         self._execution_count = 0
 
+        self._last_reset_timestamp = -1
+        self.reset_seconds = 600
+
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}("
@@ -4121,12 +4135,14 @@ cdef class OrderMatchingEngine:
         # Clear consumption tracking on UPDATE or DELETE (level changed or removed)
         if self._liquidity_consumption and (
             delta._mem.action == BookAction.UPDATE or delta._mem.action == BookAction.DELETE
-        ):
+        ) and ((self._last_reset_timestamp > 0 and (self._clock.timestamp_ns() - self._last_reset_timestamp)  / 1e9  > self.reset_seconds) or self.optimistic or self._last_reset_timestamp < 0):
             if delta._mem.order.side == OrderSide.SELL:
                 self._ask_consumption.pop(delta._mem.order.price.raw, None)
             elif delta._mem.order.side == OrderSide.BUY:
                 self._bid_consumption.pop(delta._mem.order.price.raw, None)
             self.update_user_consumption()
+            #self._minlog("consumption_reset", f"Reset consumption tracking on action={int(delta._mem.action)} at price={delta._mem.order.price} side={int(delta._mem.order.side)} for instrument {str(self.instrument.raw_symbol)} because last reset was at {self._last_reset_timestamp} ({(self._clock.timestamp_ns() - self._last_reset_timestamp) / 1e9:.2f} seconds ago) and optimistic={self.optimistic}")
+            self._last_reset_timestamp = self._clock.timestamp_ns()
 
         if self._queue_position and delta._mem.action == BookAction.DELETE:
             self._clear_queue_on_delete(delta._mem.order.price.raw, delta._mem.order.side)
@@ -4178,12 +4194,14 @@ cdef class OrderMatchingEngine:
             # Clear consumption tracking on UPDATE or DELETE (level changed or removed)
             if self._liquidity_consumption and (
                 delta._mem.action == BookAction.UPDATE or delta._mem.action == BookAction.DELETE
-            ):
+            ) and ((self._last_reset_timestamp > 0 and (self._clock.timestamp_ns() - self._last_reset_timestamp)  / 1e9  > self.reset_seconds) or self.optimistic or self._last_reset_timestamp < 0):
                 if delta._mem.order.side == OrderSide.SELL:
                     self._ask_consumption.pop(delta._mem.order.price.raw, None)
                 elif delta._mem.order.side == OrderSide.BUY:
                     self._bid_consumption.pop(delta._mem.order.price.raw, None)
                 self.update_user_consumption()
+                #self._minlog("consumption_reset", f"Reset consumption tracking on action={int(delta._mem.action)} at price={delta._mem.order.price} side={int(delta._mem.order.side)} for instrument {str(self.instrument.raw_symbol)} because last reset was at {self._last_reset_timestamp} ({(self._clock.timestamp_ns() - self._last_reset_timestamp) / 1e9:.2f} seconds ago) and optimistic={self.optimistic}")
+                self._last_reset_timestamp = self._clock.timestamp_ns()
 
             if self._queue_position and delta._mem.action == BookAction.DELETE:
                 self._clear_queue_on_delete(delta._mem.order.price.raw, delta._mem.order.side)
@@ -6199,17 +6217,23 @@ cdef class OrderMatchingEngine:
 
             self._minlog(
                 "LIQ_CONSUMP",
-                f"applying custom logic -> resetting if new < old : price={book_price} new={level_size_f} old={original_size_f} consumed={consumed_f} remaining_qty={remaining_f} "
+                f"applying custom logic -> resetting if new != old after {self.reset_seconds} seconds : price={book_price} new={level_size_f} old={original_size_f} consumed={consumed_f} remaining_qty={remaining_f} "
             )
 
             if original_size != level_size_raw:
                 original_size = level_size_raw
-                if level_size_raw < original_size or self.optimistic:
+                if self._last_reset_timestamp < 0 or (self._last_reset_timestamp > 0 and (self._clock.timestamp_ns() - self._last_reset_timestamp)  / 1e9  > self.reset_seconds) or self.optimistic:
                     consumed = 0
                     consumed_f = 0
                     self._minlog(
                         "LIQ_CONSUMP",
                         f"resetting consumption due to level size change: price={book_price} new={level_size_f} old={original_size_f} consumed reset to 0 remaining_qty={remaining_f} "
+                    )
+                    self._last_reset_timestamp = self._clock.timestamp_ns()
+                else:
+                    self._minlog(
+                        "LIQ_CONSUMP",
+                        f"not resetting consumption despite level size change due to reset timeout not reached: now: {self._clock.timestamp_ns()} last reset: {self._last_reset_timestamp} elapsed: {(self._clock.timestamp_ns() - self._last_reset_timestamp) / 1e9} seconds reset_seconds: {self.reset_seconds} optimistic: {self.optimistic}"
                     )
 
 

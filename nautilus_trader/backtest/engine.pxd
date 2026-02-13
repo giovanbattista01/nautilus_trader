@@ -16,6 +16,7 @@
 from cpython.datetime cimport datetime
 from libc.stdint cimport uint8_t
 from libc.stdint cimport uint32_t
+from libc.stdint cimport int64_t
 from libc.stdint cimport uint64_t
 
 from nautilus_trader.accounting.accounts.base cimport Account
@@ -613,3 +614,6 @@ cdef class OrderMatchingEngine:
     cdef void update_user_consumption(
         self
     )
+
+    cdef int64_t _last_reset_timestamp
+    cdef int reset_seconds
