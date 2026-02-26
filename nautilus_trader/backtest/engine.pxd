@@ -383,6 +383,8 @@ cdef class OrderMatchingEngine:
     cdef dict[BarType, object] _execution_bar_deltas
     cdef dict[ClientOrderId, Quantity] _cached_filled_qty
 
+    cdef uint64_t _liq_call_id
+
     cdef readonly Venue venue
     """The venue for the matching engine.\n\n:returns: `Venue`"""
     cdef readonly Instrument instrument
@@ -608,9 +610,8 @@ cdef class OrderMatchingEngine:
     )
 
 # -- CUSTOM -----------------------------------------------------------------------------
-    cdef void _minlog(
-        self, str tag, str msg
-    )
+    cdef void _minlog(self, str tag, str msg, str instrument=*)
+    
     cdef void update_user_consumption(
         self
     )

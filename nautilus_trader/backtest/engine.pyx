@@ -3898,6 +3898,9 @@ cdef class OrderMatchingEngine:
         self._last_reset_timestamp = -1
         self.reset_seconds = 600
 
+        # custom
+        self._liq_call_id = 0
+
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}("
@@ -3909,8 +3912,11 @@ cdef class OrderMatchingEngine:
 
     ### helper function for custom logging ###
 
-    cdef inline void _minlog(self, str tag, str msg):
-        self._log.info(f"[MINLOG] {tag} {msg}")
+    cdef inline void _minlog(self, str tag, str msg, str instrument=None):
+        if instrument is None:
+            self._log.info(f"[MINLOG] {tag} {msg}")
+        else:
+            self._log.info(f"[MINLOG][{instrument}] {tag} {msg}")
 
     cdef void update_user_consumption(self):
         #self._log.info(f"Updating consumption for {self.instrument.id}")
@@ -5604,11 +5610,11 @@ cdef class OrderMatchingEngine:
         cdef InstrumentId fh_id
         cdef Instrument fh_inst
         cdef Position p
-        cdef double mw_qh = 0.0
-        cdef double mw_fh = 0.0
+        cdef double qh_pos_mwh = 0.0
+        cdef double fh_pos_mwh = 0.0
         cdef double q = 0.0
-        cdef double net_mw = 0.0
-        cdef double adj_mw = 0.0
+        cdef double net_mwh = 0.0
+        cdef double adj_mwh = 0.0
         cdef object px
         cdef double px_f = 0.0
         cdef object info
@@ -5617,6 +5623,8 @@ cdef class OrderMatchingEngine:
         cdef InstrumentId qh_id
         cdef Instrument qh_inst
         cdef double settle_px
+
+        cdef double pos_mwh = 0.0
 
         if self._expiration_processed:
             return
@@ -5638,17 +5646,6 @@ cdef class OrderMatchingEngine:
                     if timestamp_ns <= qh_inst.expiration_ns:
                         return
 
-        elif info.get("product") == "FH":
-            self._log.info(f"FH {self.instrument.id} has all child QHs expired, processing FH expiration")
-            child_ids = info.get("child_qh_ids", None)
-            if child_ids is not None:
-                for s in child_ids:
-                    qh_id = InstrumentId.from_str(<str>s)
-                    qh_inst = self.cache.instrument(qh_id)
-                    if qh_inst is None:
-                        self._log.info(f"QH {qh_id} instrument expiration : {qh_inst.expiration_ns}, current timestamp: {timestamp_ns}")
-
-            
 
         if (self._instrument_has_expiration and timestamp_ns >= self.instrument.expiration_ns) or self._instrument_close is not None:
             self._expiration_processed = True
@@ -5669,66 +5666,59 @@ cdef class OrderMatchingEngine:
                 # ---- Sirius custom logic ----
                 if info is not None and info['product'] == 'QH':
                     self._log.info(f"Processing custom QH expiration logic for {self.instrument.id}")
+
+                    qh_pos_mwh = 0.0
+                    fh_pos_mwh = 0.0
+                    net_mwh = 0.0
+                    adj_mwh = 0.0
                     
                     
                     fh_id = InstrumentId.from_str(<str>info["parent_fh_id"])
+                    fh_inst = self.cache.instrument(fh_id)
 
-                    # Total signed MW position of the QH product
+                    # --- QH energy position (MWh) ---
                     for p in self.cache.positions_open(None, self.instrument.id):
                         q = p.quantity.as_double()
                         if p.side == PositionSide.SHORT:
                             q = -q
-                        mw_qh += q * self.instrument.multiplier.as_double()
+                        qh_pos_mwh += q * self.instrument.multiplier.as_double()   # MWh (multiplier is MWh/lot)
 
-                    self._log.info(f"Total signed MW position for QH {self.instrument.id}: {mw_qh}")
-
-                     # Total signed MW position of the FH product
-                    fh_inst = self.cache.instrument(fh_id)
-                    if fh_inst is None:
-                        self._log.error(f"Cannot find FH instrument {fh_id} for QH expiration")
-                    else:
+                    # --- FH energy position (MWh for the full hour) ---
+                    if fh_inst is not None:
                         for p in self.cache.positions_open(None, fh_id):
                             q = p.quantity.as_double()
                             if p.side == PositionSide.SHORT:
                                 q = -q
-                            mw_fh += q * fh_inst.multiplier.as_double()
+                            fh_pos_mwh += q * fh_inst.multiplier.as_double()        # MWh for the hour
 
-                    self._log.info(f"Total signed MW position for FH {fh_id}: {mw_fh}")
+                    else:
+                        self._log.warn(f"Cannot find FH instrument {fh_id} for QH expiration; ignoring FH exposure in netting")
 
-                    net_mw = mw_qh + (0.25 * mw_fh) # total internal position (QH + FH)
+                    # --- Historical adjustment (must be MWh) ---
+                    adj_mwh = <double>float(info.get("imbalance_qty", 0.0))
 
-                    self._log.info(f"Net MW position for {self.instrument.id} at expiration: {net_mw} (mw_qh + 0.25 * mw_fh) ")
+                    # --- Net energy for THIS QH (include 1/4 of FH hour-energy) ---
+                    net_mwh = qh_pos_mwh + (fh_pos_mwh / 4.0) + adj_mwh
 
-                    adj_mw = <double>float(info.get("imbalance_qty", 0.0))
-                    net_mw += adj_mw
-
-                    self._log.info(f"Adjusted net MW position for {self.instrument.id} at expiration: {net_mw} (net_mw + imbalance_qty adj of {adj_mw})")
-
-
-                    if net_mw >= 0.0:
+                    # --- Pick settlement €/MWh price based on net energy sign ---
+                    if net_mwh >= 0.0:
                         px = info.get("imbalance_long_px", None)
-                        self._log.info(f"Using imbalance_long_px for settlement price since net_mw >= 0: {px}")
                     else:
                         px = info.get("imbalance_short_px", None)
-                        self._log.info(f"Using imbalance_short_px for settlement price since net_mw < 0: {px}")
 
+                    
                     if px is not None:
                         px_f = <double>float(px)
+                        if self._settlement_prices is None:
+                            self._settlement_prices = {}
+
+                        self._settlement_prices[self.instrument.id] = px_f
 
                         self._minlog(
                             "SETTLE_QH",
                             f"qh={self.instrument.id} fh={fh_id} "
-                            f"mw_qh={mw_qh} mw_fh={mw_fh} net_mw={net_mw} adj={adj_mw} "
-                            f"px={px_f} "
-                            f"fh_add={px_f*0.25} fh_price_now={self._settlement_prices.get(fh_id, 0.0)}"
+                            f"qh_pos_mwh={qh_pos_mwh} fh_pos_mwh={fh_pos_mwh} adj_mwh={adj_mwh} net_mwh={net_mwh} px={px_f}"
                         )
-
-
-                        if self._settlement_prices is None:
-                            self._settlement_prices = {}
-
-                        # Set settlement price for THIS QH instrument
-                        self._settlement_prices[self.instrument.id] = px_f
 
                         # Accumulate 1/4 into FH instrument (average over 4 QHs)
                         self._settlement_prices[fh_id] = <double>float(self._settlement_prices.get(fh_id, 0.0)) + (px_f * 0.25)
@@ -6132,6 +6122,24 @@ cdef class OrderMatchingEngine:
             double level_size_f
             double consumed_f
 
+            str iid_str
+
+            QuantityRaw orig_before 
+            QuantityRaw cons_before 
+            QuantityRaw lvl_before
+            QuantityRaw req_raw
+            QuantityRaw rem_before
+
+        iid_str = str(self.instrument.id)
+
+        self._minlog(
+            "LIQ_CONSUMP_CALL",
+            f"call_id={self._liq_call_id} max_qty_f={max_qty_raw / 1e16} n_fills={len(fills)}",
+            instrument=iid_str
+            )
+        self._liq_call_id += 1
+
+
         # Aggregated fill quantities per price (computed on-demand for missing levels)
         cdef dict[PriceRaw, QuantityRaw] fill_totals = None
 
@@ -6142,6 +6150,9 @@ cdef class OrderMatchingEngine:
             price = fill[0]
             qty = fill[1]
             price_raw = price._mem.raw
+
+            req_raw = qty._mem.raw
+            rem_before = remaining_qty
 
             # Use book_price for consumption tracking (original price before MAKER adjustment),
             # but use price (potentially adjusted) for the output fill.
@@ -6157,8 +6168,20 @@ cdef class OrderMatchingEngine:
 
             level_state = consumption.get(book_price_raw)
 
+            self._minlog(
+                "LIQ_IN",
+                f"i={fill_idx} fill_px={price} book_px={book_price} "
+                f"req_raw={req_raw} rem_before={rem_before} "
+                f"level_raw={level_size_raw} has_state={1 if level_state is not None else 0}",
+                instrument=iid_str
+            )
+
             # Handle race condition where level no longer exists in book (returns 0)
             if level_size_raw == 0:
+                self._log.info(
+                    f"Liquidity consumption: level {book_price} not found in book, "
+                    f"checking for fills to determine fallback size (fill_idx={fill_idx})",
+                )
                 # Level was deleted/modified between fill determination and consumption.
                 # Use aggregated fill total for this price (handles L3 books with multiple
                 # fills at same price). If prior state exists, use max of prior original_size
@@ -6200,10 +6223,9 @@ cdef class OrderMatchingEngine:
                 original_size = level_state[0]
                 consumed = level_state[1]
 
-            """# Reset consumption when book size changes (fresh data)
-            if original_size != level_size_raw:
-                original_size = level_size_raw
-                consumed = 0"""
+            orig_before = original_size
+            cons_before = consumed
+            lvl_before = level_size_raw
 
             # if optimistic = False we do not reset consumption on level increases...
 
@@ -6217,7 +6239,8 @@ cdef class OrderMatchingEngine:
 
             self._minlog(
                 "LIQ_CONSUMP",
-                f"applying custom logic -> resetting if new != old after {self.reset_seconds} seconds : price={book_price} new={level_size_f} old={original_size_f} consumed={consumed_f} remaining_qty={remaining_f} "
+                f"applying custom logic -> resetting if new != old after {self.reset_seconds} seconds : price={book_price} new={level_size_f} old={original_size_f} consumed={consumed_f} remaining_qty={remaining_f} ",
+                instrument=iid_str
             )
 
             if original_size != level_size_raw:
@@ -6227,29 +6250,62 @@ cdef class OrderMatchingEngine:
                     consumed_f = 0
                     self._minlog(
                         "LIQ_CONSUMP",
-                        f"resetting consumption due to level size change: price={book_price} new={level_size_f} old={original_size_f} consumed reset to 0 remaining_qty={remaining_f} "
+                        f"resetting consumption due to level size change: price={book_price} new={level_size_f} old={original_size_f} consumed reset to 0 remaining_qty={remaining_f} ",
+                        instrument=iid_str
                     )
                     self._last_reset_timestamp = self._clock.timestamp_ns()
                 else:
                     self._minlog(
                         "LIQ_CONSUMP",
-                        f"not resetting consumption despite level size change due to reset timeout not reached: now: {self._clock.timestamp_ns()} last reset: {self._last_reset_timestamp} elapsed: {(self._clock.timestamp_ns() - self._last_reset_timestamp) / 1e9} seconds reset_seconds: {self.reset_seconds} optimistic: {self.optimistic}"
+                        f"not resetting consumption despite level size change due to reset timeout not reached: now: {self._clock.timestamp_ns()} last reset: {self._last_reset_timestamp} elapsed: {(self._clock.timestamp_ns() - self._last_reset_timestamp) / 1e9} seconds reset_seconds: {self.reset_seconds} optimistic: {self.optimistic}",
+                        instrument=iid_str
                     )
 
+            self._minlog(
+                "LIQ_STATE",
+                f"i={fill_idx} book_px={book_price} "
+                f"orig_before={orig_before} cons_before={cons_before} "
+                f"level_raw={lvl_before} -> orig_use={original_size} cons_use={consumed}",
+                instrument=iid_str
+            )
 
             available = original_size - consumed if original_size > consumed else 0
+
             if available == 0:
-                self._log.debug(
-                    f"Liquidity consumed: skipping level {book_price} "
-                    f"(original_size={original_size}, consumed={consumed}, level_size_raw={level_size_raw})",
+                self._minlog(
+                    "LIQ_DROP",
+                    f"i={fill_idx} book_px={book_price} reason=NO_AVAIL "
+                    f"req_raw={req_raw} avail_raw={available} "
+                    f"orig_use={original_size} cons_use={consumed} level_raw={level_size_raw} "
+                    f"rem_before={rem_before}",
+                    instrument=iid_str
                 )
                 continue
+
+            else:
+                self._minlog(
+                    "LIQ_KEEP",
+                    f"i={fill_idx} book_px={book_price} reason=AVAILABLE "
+                    f"req_raw={req_raw} avail_raw={available} "
+                    f"orig_use={original_size} cons_use={consumed} level_raw={level_size_raw} "
+                    f"rem_before={rem_before}",
+                    instrument=iid_str
+                )
 
             adjusted_qty_raw = min(qty._mem.raw, available)
 
             if max_qty_raw > 0:
                 adjusted_qty_raw = min(adjusted_qty_raw, remaining_qty)
                 remaining_qty -= adjusted_qty_raw
+
+            rem_after = remaining_qty  # after possible decrement
+            self._minlog(
+                "LIQ_TAKE",
+                f"i={fill_idx} book_px={book_price} "
+                f"take_raw={adjusted_qty_raw} req_raw={req_raw} avail_raw={available} "
+                f"rem_after={rem_after} max_active={1 if max_qty_raw>0 else 0}",
+                instrument=iid_str
+            )
 
             if adjusted_qty_raw == 0:
                 continue
@@ -6259,6 +6315,14 @@ cdef class OrderMatchingEngine:
 
             adjusted_qty = Quantity.from_raw_c(adjusted_qty_raw, qty._mem.precision)
             adjusted_fills.append((price, adjusted_qty))
+
+            consumed_after = consumed
+            self._minlog(
+                "LIQ_UPDATE",
+                f"i={fill_idx} book_px={book_price}  key_raw={book_price_raw} "
+                f"orig_use={original_size} cons_before={cons_before} -> cons_after={consumed_after}",
+                instrument=iid_str
+            )
 
         self.update_user_consumption()
         return adjusted_fills
@@ -6639,7 +6703,18 @@ cdef class OrderMatchingEngine:
             else:
                 raise RuntimeError(f"invalid `OrderSide`, was {order.side}")  # pragma: no cover (design-time error)
 
-        return self._apply_liquidity_consumption(fills, order.side, order.leaves_qty._mem.raw, book_prices)
+        self._minlog(
+            "BEFORE_CONSUMPTION_FILLS",
+            f"{order.client_order_id} at order price {order.price} with order leaves_qty {order.leaves_qty}: determining fills {fills}",
+            instrument=str(self.instrument.id)
+            )
+        fills = self._apply_liquidity_consumption(fills, order.side, order.leaves_qty._mem.raw, book_prices)
+        self._minlog(
+            "AFTER_CONSUMPTION_FILLS",
+            f"{order.client_order_id} at order side {order.side} price {order.price} with order leaves_qty {order.leaves_qty}: determined fills {fills}",
+            instrument=str(self.instrument.id)
+            )
+        return fills
 
     cdef void _snapshot_queue_position(self, Order order, Price price):
         # get_quantity_at_level uses "incoming order side" semantics: passing SELL returns
