@@ -5651,7 +5651,7 @@ cdef class OrderMatchingEngine:
             self._expiration_processed = True
             self._log.info(f"{self.instrument.id} reached expiration")
 
-            self._minlog("EXPIRE", f"instrument={self.instrument.id} ts={timestamp_ns}")
+            self._minlog("EXPIRE", f"ts={timestamp_ns}", instrument=str(self.instrument.id))
 
             # Cancel all open orders
             for order in self.get_open_orders():
@@ -5665,7 +5665,7 @@ cdef class OrderMatchingEngine:
                 
                 # ---- Sirius custom logic ----
                 if info is not None and info['product'] == 'QH':
-                    self._log.info(f"Processing custom QH expiration logic for {self.instrument.id}")
+                    self._log.info(f"Processing custom QH expiration logic for {str(self.instrument.id)}")
 
                     qh_pos_mwh = 0.0
                     fh_pos_mwh = 0.0
@@ -5705,7 +5705,6 @@ cdef class OrderMatchingEngine:
                         px = info.get("imbalance_long_px", None)
                     else:
                         px = info.get("imbalance_short_px", None)
-
                     
                     if px is not None:
                         px_f = <double>float(px)
@@ -5716,8 +5715,10 @@ cdef class OrderMatchingEngine:
 
                         self._minlog(
                             "SETTLE_QH",
-                            f"qh={self.instrument.id} fh={fh_id} "
-                            f"qh_pos_mwh={qh_pos_mwh} fh_pos_mwh={fh_pos_mwh} adj_mwh={adj_mwh} net_mwh={net_mwh} px={px_f}"
+                            f"ts={timestamp_ns} fh={fh_id} "
+                            f"qh_pos_mwh={qh_pos_mwh:.6f} fh_pos_mwh={fh_pos_mwh:.6f} "
+                            f"adj_mwh={adj_mwh:.6f} net_mwh={net_mwh:.6f} px={px_f:.6f}",
+                            instrument=str(self.instrument.id),
                         )
 
                         # Accumulate 1/4 into FH instrument (average over 4 QHs)
@@ -5726,25 +5727,18 @@ cdef class OrderMatchingEngine:
 
                         self._minlog(
                             "SETTLE_ACC",
-                            f"fh={fh_id} fh_price_new={self._settlement_prices[fh_id]}"
+                            f"ts={timestamp_ns} fh_price_new={self._settlement_prices[fh_id]:.6f}",
+                            instrument=str(fh_id),
                         )
-
 
 
                 for position in self.cache.positions_open(None, self.instrument.id):
 
-
                     self._minlog(
                         "SETTLE_POS",
-                        "instrument=%s pos_id=%s trader=%s strategy=%s side=%s qty=%s"
-                        % (
-                            self.instrument.id,
-                            position.id,
-                            position.trader_id,
-                            position.strategy_id,
-                            position.side,
-                            position.quantity,
-                        ),
+                        "ts=%s pos_id=%s trader=%s strategy=%s side=%s qty=%s"
+                        % (timestamp_ns, position.id, position.trader_id, position.strategy_id, position.side, position.quantity),
+                        instrument=str(self.instrument.id),
                     )
 
                     order = MarketOrder(
@@ -5766,14 +5760,9 @@ cdef class OrderMatchingEngine:
 
                         self._minlog(
                             "SETTLE_FILL",
-                            "instrument=%s cid=%s pos_id=%s settle_px=%.10f qty=%s liq=TAKER"
-                            % (
-                                self.instrument.id,
-                                order.client_order_id,
-                                position.id,
-                                settle_px,
-                                position.quantity,
-                            ),
+                            "ts=%s cid=%s pos_id=%s settle_px=%.10f qty=%s liq=TAKER"
+                            % (timestamp_ns, order.client_order_id, position.id, settle_px, position.quantity),
+                            instrument=str(self.instrument.id),
                         )
 
 
@@ -5792,13 +5781,9 @@ cdef class OrderMatchingEngine:
                     else:
                         self._minlog(
                             "SETTLE_MKT",
-                            "instrument=%s cid=%s pos_id=%s qty=%s reason=no_settlement_price"
-                            % (
-                                self.instrument.id,
-                                order.client_order_id,
-                                position.id,
-                                position.quantity,
-                            ),
+                            "ts=%s cid=%s pos_id=%s qty=%s reason=no_settlement_price"
+                            % (timestamp_ns, order.client_order_id, position.id, position.quantity),
+                            instrument=str(self.instrument.id),
                         )
 
 
@@ -6132,11 +6117,11 @@ cdef class OrderMatchingEngine:
 
         iid_str = str(self.instrument.id)
 
-        self._minlog(
+        """self._minlog(
             "LIQ_CONSUMP_CALL",
             f"call_id={self._liq_call_id} max_qty_f={max_qty_raw / 1e16} n_fills={len(fills)}",
             instrument=iid_str
-            )
+            )"""
         self._liq_call_id += 1
 
 
@@ -6168,13 +6153,13 @@ cdef class OrderMatchingEngine:
 
             level_state = consumption.get(book_price_raw)
 
-            self._minlog(
+            """self._minlog(
                 "LIQ_IN",
                 f"i={fill_idx} fill_px={price} book_px={book_price} "
                 f"req_raw={req_raw} rem_before={rem_before} "
                 f"level_raw={level_size_raw} has_state={1 if level_state is not None else 0}",
                 instrument=iid_str
-            )
+            )"""
 
             # Handle race condition where level no longer exists in book (returns 0)
             if level_size_raw == 0:
@@ -6237,11 +6222,11 @@ cdef class OrderMatchingEngine:
             level_size_f = level_size_raw / SCALE
             consumed_f = consumed / SCALE
 
-            self._minlog(
+            """self._minlog(
                 "LIQ_CONSUMP",
                 f"applying custom logic -> resetting if new != old after {self.reset_seconds} seconds : price={book_price} new={level_size_f} old={original_size_f} consumed={consumed_f} remaining_qty={remaining_f} ",
                 instrument=iid_str
-            )
+            )"""
 
             if original_size != level_size_raw:
                 original_size = level_size_raw
@@ -6250,45 +6235,52 @@ cdef class OrderMatchingEngine:
                     consumed_f = 0
                     self._minlog(
                         "LIQ_CONSUMP",
-                        f"resetting consumption due to level size change: price={book_price} new={level_size_f} old={original_size_f} consumed reset to 0 remaining_qty={remaining_f} ",
+                        f"resetting consumption due to level size change: price={book_price} new={level_size_f} old={original_size_f} consumed reset to 0 remaining_qty={remaining_f} elapsed: {(self._clock.timestamp_ns() - self._last_reset_timestamp) / 1e9} seconds reset_seconds: {self.reset_seconds} optimistic: {self.optimistic} ",
                         instrument=iid_str
                     )
                     self._last_reset_timestamp = self._clock.timestamp_ns()
-                else:
+                """else:
                     self._minlog(
                         "LIQ_CONSUMP",
                         f"not resetting consumption despite level size change due to reset timeout not reached: now: {self._clock.timestamp_ns()} last reset: {self._last_reset_timestamp} elapsed: {(self._clock.timestamp_ns() - self._last_reset_timestamp) / 1e9} seconds reset_seconds: {self.reset_seconds} optimistic: {self.optimistic}",
                         instrument=iid_str
-                    )
+                    )"""
 
-            self._minlog(
+            """self._minlog(
                 "LIQ_STATE",
                 f"i={fill_idx} book_px={book_price} "
                 f"orig_before={orig_before} cons_before={cons_before} "
                 f"level_raw={lvl_before} -> orig_use={original_size} cons_use={consumed}",
                 instrument=iid_str
-            )
+            )"""
 
             available = original_size - consumed if original_size > consumed else 0
 
             if available == 0:
-                self._minlog(
+                """self._minlog(
                     "LIQ_DROP",
                     f"i={fill_idx} book_px={book_price} reason=NO_AVAIL "
                     f"req_raw={req_raw} avail_raw={available} "
                     f"orig_use={original_size} cons_use={consumed} level_raw={level_size_raw} "
                     f"rem_before={rem_before}",
                     instrument=iid_str
-                )
+                )"""
                 continue
 
             else:
-                self._minlog(
+                """self._minlog(
                     "LIQ_KEEP",
                     f"i={fill_idx} book_px={book_price} reason=AVAILABLE "
                     f"req_raw={req_raw} avail_raw={available} "
                     f"orig_use={original_size} cons_use={consumed} level_raw={level_size_raw} "
                     f"rem_before={rem_before}",
+                    instrument=iid_str
+                )"""
+                self._minlog(
+                    "LIQ_KEEP",
+                    f"i={fill_idx} book_px={book_price} reason=AVAILABLE"
+                    f"req={req_raw/SCALE} available ={available / SCALE} "
+                    f"orig_use={original_size/SCALE} cons_use={consumed/SCALE} level={level_size_raw/SCALE} ",
                     instrument=iid_str
                 )
 
@@ -6299,13 +6291,13 @@ cdef class OrderMatchingEngine:
                 remaining_qty -= adjusted_qty_raw
 
             rem_after = remaining_qty  # after possible decrement
-            self._minlog(
+            """self._minlog(
                 "LIQ_TAKE",
                 f"i={fill_idx} book_px={book_price} "
                 f"take_raw={adjusted_qty_raw} req_raw={req_raw} avail_raw={available} "
                 f"rem_after={rem_after} max_active={1 if max_qty_raw>0 else 0}",
                 instrument=iid_str
-            )
+            )"""
 
             if adjusted_qty_raw == 0:
                 continue
@@ -6317,12 +6309,12 @@ cdef class OrderMatchingEngine:
             adjusted_fills.append((price, adjusted_qty))
 
             consumed_after = consumed
-            self._minlog(
+            """self._minlog(
                 "LIQ_UPDATE",
                 f"i={fill_idx} book_px={book_price}  key_raw={book_price_raw} "
                 f"orig_use={original_size} cons_before={cons_before} -> cons_after={consumed_after}",
                 instrument=iid_str
-            )
+            )"""
 
         self.update_user_consumption()
         return adjusted_fills
@@ -6703,17 +6695,17 @@ cdef class OrderMatchingEngine:
             else:
                 raise RuntimeError(f"invalid `OrderSide`, was {order.side}")  # pragma: no cover (design-time error)
 
-        self._minlog(
+        """self._minlog(
             "BEFORE_CONSUMPTION_FILLS",
             f"{order.client_order_id} at order price {order.price} with order leaves_qty {order.leaves_qty}: determining fills {fills}",
             instrument=str(self.instrument.id)
-            )
+            )"""
         fills = self._apply_liquidity_consumption(fills, order.side, order.leaves_qty._mem.raw, book_prices)
-        self._minlog(
+        """self._minlog(
             "AFTER_CONSUMPTION_FILLS",
             f"{order.client_order_id} at order side {order.side} price {order.price} with order leaves_qty {order.leaves_qty}: determined fills {fills}",
             instrument=str(self.instrument.id)
-            )
+            )"""
         return fills
 
     cdef void _snapshot_queue_position(self, Order order, Price price):
