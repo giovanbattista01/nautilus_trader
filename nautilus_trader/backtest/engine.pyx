@@ -5614,7 +5614,7 @@ cdef class OrderMatchingEngine:
         cdef double fh_pos_mwh = 0.0
         cdef double q = 0.0
         cdef double net_mwh = 0.0
-        cdef double adj_mwh = 0.0
+        cdef double imb = 0.0
         cdef object px
         cdef double px_f = 0.0
         cdef object info
@@ -5625,6 +5625,8 @@ cdef class OrderMatchingEngine:
         cdef double settle_px
 
         cdef double pos_mwh = 0.0
+
+        cdef double sibling_qh_pos = 0.0
 
         if self._expiration_processed:
             return
@@ -5665,40 +5667,74 @@ cdef class OrderMatchingEngine:
                 
                 # ---- Sirius custom logic ----
                 if info is not None and info['product'] == 'QH':
-                    self._log.info(f"Processing custom QH expiration logic for {str(self.instrument.id)}")
 
-                    qh_pos_mwh = 0.0
-                    fh_pos_mwh = 0.0
-                    net_mwh = 0.0
-                    adj_mwh = 0.0
-                    
-                    
                     fh_id = InstrumentId.from_str(<str>info["parent_fh_id"])
                     fh_inst = self.cache.instrument(fh_id)
 
-                    # --- QH energy position (MWh) ---
-                    for p in self.cache.positions_open(None, self.instrument.id):
-                        q = p.quantity.as_double()
-                        if p.side == PositionSide.SHORT:
-                            q = -q
-                        qh_pos_mwh += q * self.instrument.multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                    if info.get("final_imbalance_quantity",None) is not None:
+                        final_imbalance_qty = float(info["final_imbalance_quantity"]) # already computed by some other ordermatching engine
+                    
+                    else:  # we have to compute total imbalance quantity: historical imbalance + current positions (all zones in macro) - historical positions (all zones in macro)
 
-                    # --- FH energy position (MWh for the full hour) ---
-                    if fh_inst is not None:
-                        for p in self.cache.positions_open(None, fh_id):
+                        self._log.info(f"Processing custom QH expiration logic for {str(self.instrument.id)}")
+
+                        qh_pos_mwh = 0.0
+                        fh_pos_mwh = 0.0
+                        net_mwh = 0.0
+                        adj_mwh = 0.0
+
+                        # --- QH energy position (MWh) ---
+                        for p in self.cache.positions_open(None, self.instrument.id):
                             q = p.quantity.as_double()
                             if p.side == PositionSide.SHORT:
                                 q = -q
-                            fh_pos_mwh += q * fh_inst.multiplier.as_double()        # MWh for the hour
+                            qh_pos_mwh += q * self.instrument.multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                            self._log.info(f"QH position in MWh: {qh_pos_mwh:.6f} for instrument {str(self.instrument.id)}")
 
-                    else:
-                        self._log.warn(f"Cannot find FH instrument {fh_id} for QH expiration; ignoring FH exposure in netting")
+                        siblings = info.get("sibling_qh_ids",None)
+                        if siblings is not None and len(siblings) > 0:
+                            self._log.info(f"Found sibling QHs for {str(self.instrument.id)}: {siblings}")
+                            for s in siblings:
+                                sibling_qh_pos = 0.0
+                                sibling_qh_id = self.cache.instrument_id_from_str(<str>s)
+                                for p in self.cache.positions_open(None, sibling_qh_id):
+                                    q = p.quantity.as_double()
+                                    if p.side == PositionSide.SHORT:
+                                        q = -q
+                                    sibling_qh_pos += q * self.cache.instrument(sibling_qh_id).multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                                self._log.info(f"Sibling QH {sibling_qh_id} position in MWh: {sibling_qh_pos:.6f}")
+                                qh_pos_mwh += sibling_qh_pos
 
-                    # --- Historical adjustment (must be MWh) ---
-                    adj_mwh = <double>float(info.get("imbalance_qty", 0.0))
+                        # -- QH energy position (MWh) historical --
 
-                    # --- Net energy for THIS QH (include 1/4 of FH hour-energy) ---
-                    net_mwh = qh_pos_mwh + (fh_pos_mwh / 4.0) + adj_mwh
+                        if info.get("historical_pos",None) is not None:
+                            self._log.info(f"Considering historical position for {str(self.instrument.id)}: {info['historical_pos']}")
+                            qh_pos_mwh -= float(info["historical_pos"]) * self.instrument.multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                        
+                        if siblings is not None and len(siblings) > 0:
+                            for s in siblings:
+                                sibling_qh_id = self.cache.instrument_id_from_str(<str>s)
+                                sibling_historical_pos = float(info.get(f"historical_pos_{s}",0.0))
+                                self._log.info(f"Considering historical position for sibling QH {sibling_qh_id}: {sibling_historical_pos}")
+                                qh_pos_mwh -= sibling_historical_pos * self.cache.instrument(sibling_qh_id).multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                                
+
+                        # --- FH energy position (MWh for the full hour) --- #TODO: fix FH computation
+                        if fh_inst is not None:
+                            for p in self.cache.positions_open(None, fh_id):
+                                q = p.quantity.as_double()
+                                if p.side == PositionSide.SHORT:
+                                    q = -q
+                                fh_pos_mwh += q * fh_inst.multiplier.as_double()        # MWh for the hour
+
+                        else:
+                            self._log.warn(f"Cannot find FH instrument {fh_id} for QH expiration; ignoring FH exposure in netting")
+
+                        # --- Historical imbalance quantity (must be MWh) ---
+                        imb = <double>float(info.get("imbalance_qty", 0.0))
+
+                        # --- Net energy for THIS QH (include 1/4 of FH hour-energy) ---
+                        net_mwh = qh_pos_mwh + (fh_pos_mwh / 4.0) + imb
 
                     # --- Pick settlement €/MWh price based on net energy sign ---
                     if net_mwh >= 0.0:
@@ -5717,7 +5753,7 @@ cdef class OrderMatchingEngine:
                             "SETTLE_QH",
                             f"ts={timestamp_ns} fh={fh_id} "
                             f"qh_pos_mwh={qh_pos_mwh:.6f} fh_pos_mwh={fh_pos_mwh:.6f} "
-                            f"adj_mwh={adj_mwh:.6f} net_mwh={net_mwh:.6f} px={px_f:.6f}",
+                            f"imb={imb:.6f} net_mwh={net_mwh:.6f} px={px_f:.6f}",
                             instrument=str(self.instrument.id),
                         )
 
