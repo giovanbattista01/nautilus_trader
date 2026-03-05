@@ -5672,16 +5672,17 @@ cdef class OrderMatchingEngine:
                     fh_inst = self.cache.instrument(fh_id)
 
                     if info.get("final_imbalance_quantity",None) is not None:
-                        final_imbalance_qty = float(info["final_imbalance_quantity"]) # already computed by some other ordermatching engine
+                        net_mwh = float(info["final_imbalance_quantity"]) # already computed by some other ordermatching engine
+                        self._log.info(f"Using pre-computed final imbalance quantity for {str(self.instrument.id)}: {net_mwh:.6f} MWh")
                     
                     else:  # we have to compute total imbalance quantity: historical imbalance + current positions (all zones in macro) - historical positions (all zones in macro)
 
+                        self._log.info(f"Computing final imbalance quantity for {str(self.instrument.id)} from scratch (no pre-computed value)")
                         self._log.info(f"Processing custom QH expiration logic for {str(self.instrument.id)}")
 
                         qh_pos_mwh = 0.0
                         fh_pos_mwh = 0.0
                         net_mwh = 0.0
-                        adj_mwh = 0.0
 
                         # --- QH energy position (MWh) ---
                         for p in self.cache.positions_open(None, self.instrument.id):
@@ -5689,19 +5690,22 @@ cdef class OrderMatchingEngine:
                             if p.side == PositionSide.SHORT:
                                 q = -q
                             qh_pos_mwh += q * self.instrument.multiplier.as_double()   # MWh (multiplier is MWh/lot)
-                            self._log.info(f"QH position in MWh: {qh_pos_mwh:.6f} for instrument {str(self.instrument.id)}")
+                            self._log.info(f"Simulated position in MWh: {qh_pos_mwh:.6f} for instrument {str(self.instrument.id)}")
 
                         siblings = info.get("sibling_qh_ids",None)
                         if siblings is not None and len(siblings) > 0:
                             self._log.info(f"Found sibling QHs for {str(self.instrument.id)}: {siblings}")
                             for s in siblings:
                                 sibling_qh_pos = 0.0
-                                sibling_qh_id = self.cache.instrument_id_from_str(<str>s)
+
+                                sibling_qh_id = InstrumentId.from_str(<str>s)
+                                sibling_qh_inst = self.cache.instrument(sibling_qh_id)
+
                                 for p in self.cache.positions_open(None, sibling_qh_id):
                                     q = p.quantity.as_double()
                                     if p.side == PositionSide.SHORT:
                                         q = -q
-                                    sibling_qh_pos += q * self.cache.instrument(sibling_qh_id).multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                                    sibling_qh_pos += q * sibling_qh_inst.multiplier.as_double()   # MWh (multiplier is MWh/lot)
                                 self._log.info(f"Sibling QH {sibling_qh_id} position in MWh: {sibling_qh_pos:.6f}")
                                 qh_pos_mwh += sibling_qh_pos
 
@@ -5709,14 +5713,15 @@ cdef class OrderMatchingEngine:
 
                         if info.get("historical_pos",None) is not None:
                             self._log.info(f"Considering historical position for {str(self.instrument.id)}: {info['historical_pos']}")
-                            qh_pos_mwh -= float(info["historical_pos"]) * self.instrument.multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                            qh_pos_mwh -= float(info["historical_pos"]) # IMPORTANT: assumed to be already in MWh
                         
                         if siblings is not None and len(siblings) > 0:
                             for s in siblings:
-                                sibling_qh_id = self.cache.instrument_id_from_str(<str>s)
+                                sibling_qh_id = InstrumentId.from_str(<str>s)
+                                sibling_qh_inst = self.cache.instrument(sibling_qh_id)
                                 sibling_historical_pos = float(info.get(f"historical_pos_{s}",0.0))
                                 self._log.info(f"Considering historical position for sibling QH {sibling_qh_id}: {sibling_historical_pos}")
-                                qh_pos_mwh -= sibling_historical_pos * self.cache.instrument(sibling_qh_id).multiplier.as_double()   # MWh (multiplier is MWh/lot)
+                                qh_pos_mwh -= sibling_historical_pos # IMPORTANT: assumed to be already in MWh
                                 
 
                         # --- FH energy position (MWh for the full hour) --- #TODO: fix FH computation
@@ -5732,9 +5737,16 @@ cdef class OrderMatchingEngine:
 
                         # --- Historical imbalance quantity (must be MWh) ---
                         imb = <double>float(info.get("imbalance_qty", 0.0))
+                        self._log.info(f"Historical imbalance quantity for {str(self.instrument.id)}: {imb:.6f} MWh")
 
                         # --- Net energy for THIS QH (include 1/4 of FH hour-energy) ---
                         net_mwh = qh_pos_mwh + (fh_pos_mwh / 4.0) + imb
+
+                        # we now have to update every sibling so it gets this settlement quantity 
+                        for s in info.get("sibling_qh_ids",[]):
+                            sibling_qh_id = InstrumentId.from_str(s)
+                            sibling_info = self.cache.instrument(sibling_qh_id).info
+                            sibling_info["final_imbalance_quantity"] = net_mwh
 
                     # --- Pick settlement €/MWh price based on net energy sign ---
                     if net_mwh >= 0.0:
@@ -5751,9 +5763,8 @@ cdef class OrderMatchingEngine:
 
                         self._minlog(
                             "SETTLE_QH",
-                            f"ts={timestamp_ns} fh={fh_id} "
-                            f"qh_pos_mwh={qh_pos_mwh:.6f} fh_pos_mwh={fh_pos_mwh:.6f} "
-                            f"imb={imb:.6f} net_mwh={net_mwh:.6f} px={px_f:.6f}",
+                            f"ts={timestamp_ns} "
+                            f"net_mwh={net_mwh:.6f} px={px_f:.6f}",
                             instrument=str(self.instrument.id),
                         )
 
