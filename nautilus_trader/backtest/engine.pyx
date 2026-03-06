@@ -5719,7 +5719,7 @@ cdef class OrderMatchingEngine:
                             for s in siblings:
                                 sibling_qh_id = InstrumentId.from_str(<str>s)
                                 sibling_qh_inst = self.cache.instrument(sibling_qh_id)
-                                sibling_historical_pos = float(info.get(f"historical_pos_{s}",0.0))
+                                sibling_historical_pos = float(sibling_qh_inst.info.get("historical_pos",0.0))
                                 self._log.info(f"Considering historical position for sibling QH {sibling_qh_id}: {sibling_historical_pos}")
                                 qh_pos_mwh -= sibling_historical_pos # IMPORTANT: assumed to be already in MWh
                                 
