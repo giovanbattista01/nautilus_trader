@@ -201,6 +201,9 @@ from nautilus_trader.model.position cimport Position
 from nautilus_trader.portfolio.base cimport PortfolioFacade
 from nautilus_trader.trading.strategy cimport Strategy
 
+# CUSTOM
+from nautilus_trader.backtest.coupling_manager import ZoneCouplingManager, CouplingInterval
+
 
 cdef class BacktestEngine:
     """
@@ -533,6 +536,8 @@ cdef class BacktestEngine:
         frozen_account: bool = False,
         price_protection_points = None,
         settlement_prices: dict[InstrumentId, float] | None = None,
+        zone_coupling: bool = False,
+        coupling_intervals: list[CouplingInterval] | None = None
     ) -> None:
         """
         Add a `SimulatedExchange` with the given parameters to the backtest engine.
@@ -691,6 +696,8 @@ cdef class BacktestEngine:
             queue_position=queue_position,
             price_protection_points=price_protection_points,
             settlement_prices=settlement_prices,
+            zone_coupling = zone_coupling,
+            coupling_intervals=coupling_intervals,
         )
 
         self._venues[venue] = exchange
@@ -2720,6 +2727,8 @@ cdef class SimulatedExchange:
         bint queue_position = False,
         price_protection_points=None,
         settlement_prices: dict[InstrumentId, float] | None = None,
+        zone_coupling: bool = False,
+        coupling_intervals: list[CouplingInterval] = []
     ) -> None:
         Condition.not_empty(starting_balances, "starting_balances")
         Condition.list_type(starting_balances, Money, "starting_balances")
@@ -2807,6 +2816,13 @@ cdef class SimulatedExchange:
         spread_quote_endpoint = f"SimulatedExchange.spread_quote.{venue}"
         if spread_quote_endpoint not in self.msgbus._endpoints:
             self.msgbus.register(endpoint=spread_quote_endpoint, handler=self.process_quote_tick)
+
+        # CUSTOM: initialize coupling manager for this exchange
+        self.zone_coupling = zone_coupling
+        if self.zone_coupling:
+            intervals = coupling_intervals if coupling_intervals is not None else []
+            self._coupling_manager = ZoneCouplingManager(intervals, self._log)
+            self._log.info("Initialized CouplingManager for zone coupling")
 
     def __repr__(self) -> str:
         return (
@@ -2937,6 +2953,7 @@ cdef class SimulatedExchange:
             queue_position=self.queue_position,
             price_protection_points=self.price_protection_points,
             settlement_prices=self.settlement_prices,
+            _coupling_manager=self._coupling_manager if self.zone_coupling else None,  # Pass coupling manager to matching engine if zone coupling is enabled
         )
 
         self._matching_engines[instrument.id] = matching_engine
@@ -2944,6 +2961,15 @@ cdef class SimulatedExchange:
         self._update_next_instrument_expiration(matching_engine)
 
         self._log.info(f"Added instrument {instrument.id} and created matching engine")
+
+        # CUSTOM: we will take a ref to the matching engine for our coupling manager
+
+        if self._coupling_manager is not None:
+            engines = self._coupling_manager.get_engines()
+            engines[instrument.id] = matching_engine
+            self._coupling_manager.set_engines(engines)
+
+
 
 # -- QUERIES --------------------------------------------------------------------------------------
 
@@ -3820,6 +3846,7 @@ cdef class OrderMatchingEngine:
         bint queue_position = False,
         price_protection_points=None,
         settlement_prices: dict[InstrumentId, float] | None = None,
+        _coupling_manager: ZoneCouplingManager | None = None
     ) -> None:
         self._clock = clock
         self._log = Logger(name=f"{type(self).__name__}({instrument.id.venue})")
@@ -3900,6 +3927,7 @@ cdef class OrderMatchingEngine:
 
         # custom
         self._liq_call_id = 0
+        self._coupling_manager = _coupling_manager
 
     def __repr__(self) -> str:
         return (
@@ -3918,7 +3946,7 @@ cdef class OrderMatchingEngine:
         else:
             self._log.info(f"[MINLOG][{instrument}] {tag} {msg}")
 
-    cdef void update_user_consumption(self):
+    cpdef void update_user_consumption(self):
         #self._log.info(f"Updating consumption for {self.instrument.id}")
         cdef Instrument inst = self.instrument 
         if inst is None:
@@ -3947,6 +3975,15 @@ cdef class OrderMatchingEngine:
         bid_out.update(self._bid_consumption)
 
         cons["ver"] = cons.get("ver", 0) + 1
+
+    
+    cpdef dict get_bid_consumption(self):
+        return self._bid_consumption
+
+    cpdef dict get_ask_consumption(self):
+        return self._ask_consumption
+    """cpdef QuantityRaw get_trade_consumption(self):
+        return self._trade_consumption"""
 
 
 
@@ -6105,6 +6142,30 @@ cdef class OrderMatchingEngine:
             # Fall back to standard logic
             return self.determine_market_price_and_volume(order)
 
+
+    cdef inline bint _should_bypass_liquidity_for_fill(
+        self,
+        OrderSide order_side,
+        Price price,
+        Price book_price,
+    ):
+        cdef double price_f
+        cdef double book_price_f
+        cdef double delta_f
+
+        price_f = float(price)
+        book_price_f = float(book_price)
+
+        if order_side == OrderSide.BUY:
+            delta_f = price_f - book_price_f
+        elif order_side == OrderSide.SELL:
+            delta_f = book_price_f - price_f
+        else:
+            return False
+
+        return delta_f > 10.0
+
+
     cdef list[tuple[Price, Quantity]] _apply_liquidity_consumption(
         self,
         list[tuple[Price, Quantity]] fills,
@@ -6194,6 +6255,28 @@ cdef class OrderMatchingEngine:
             else:
                 book_price = price
                 book_price_raw = price_raw
+
+            # skip liquidity consumption for fills that are significantly better than the book price 
+            if self._should_bypass_liquidity_for_fill(order_side, price, book_price):
+                adjusted_qty_raw = qty._mem.raw
+
+                if max_qty_raw > 0:
+                    adjusted_qty_raw = min(adjusted_qty_raw, remaining_qty)
+                    remaining_qty -= adjusted_qty_raw
+
+                if adjusted_qty_raw == 0:
+                    continue
+
+                adjusted_qty = Quantity.from_raw_c(adjusted_qty_raw, qty._mem.precision)
+                adjusted_fills.append((book_price, adjusted_qty))
+
+                self._minlog(
+                    "LIQ_KEEP",
+                    f"i={fill_idx} book_px={book_price} reason=DELTA > 10 bps price={price} side = {'BUY' if order_side==OrderSide.BUY else 'SELL'}  ",
+                    instrument=iid_str
+                )
+
+                continue
 
             level_size = self._book.get_quantity_at_level(book_price, order_side, self._size_prec)
             level_size_raw = level_size._mem.raw
@@ -6351,6 +6434,20 @@ cdef class OrderMatchingEngine:
 
             consumed += adjusted_qty_raw
             consumption[book_price_raw] = (original_size, consumed)
+
+            # if zone coupling is enabled, we have to propagate consumption to sibling zones 
+
+            if self._coupling_manager is not None:
+                siblings = self._coupling_manager.propagate_liq_consumption( 
+                    self.instrument.id, self._clock.timestamp_ns(), order_side, book_price_raw, adjusted_qty_raw  
+                )
+
+                if siblings is not None and len(siblings) > 0:
+                    for instr_id in siblings:
+                        sibling_engine = self._coupling_manager.get_engines().get(instr_id)
+                        if sibling_engine is not None:
+                            sibling_engine.update_user_consumption()
+
 
             adjusted_qty = Quantity.from_raw_c(adjusted_qty_raw, qty._mem.precision)
             adjusted_fills.append((price, adjusted_qty))

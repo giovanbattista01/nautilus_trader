@@ -280,6 +280,8 @@ cdef class SimulatedExchange:
     """Optional instrument_id -> settlement price for instrument expiration."""
 
     cdef dict[InstrumentId, OrderMatchingEngine] _matching_engines
+    cdef object _coupling_manager
+    cdef bool zone_coupling
     cdef bint _has_next_instrument_expiration
     cdef uint64_t _next_instrument_expiration_ns
     cdef object _message_queue
@@ -507,6 +509,7 @@ cdef class OrderMatchingEngine:
     cpdef list[tuple[Price, Quantity]] determine_market_price_and_volume(self, Order order)
     cdef list[tuple[Price, Quantity]] determine_market_fills_with_simulation(self, Order order)
     cdef list[tuple[Price, Quantity]] determine_limit_fills_with_simulation(self, Order order)
+    cdef inline bint _should_bypass_liquidity_for_fill(self,OrderSide order_side,Price price,Price book_price,)
     cdef list[tuple[Price, Quantity]] _apply_liquidity_consumption(self, list fills, OrderSide order_side, QuantityRaw max_qty_raw=*, list[Price] book_prices=*)
     cdef Quantity determine_trade_fill_qty(self, Order order)
     cpdef void fill_market_order(self, Order order)
@@ -612,9 +615,16 @@ cdef class OrderMatchingEngine:
 # -- CUSTOM -----------------------------------------------------------------------------
     cdef void _minlog(self, str tag, str msg, str instrument=*)
     
-    cdef void update_user_consumption(
+    cpdef void update_user_consumption(
         self
     )
 
+    cpdef dict get_bid_consumption(self)
+    cpdef dict get_ask_consumption(self)
+    #cpdef Quantity get_trade_consumption(self)
+    #cpdef void add_trade_consumption(self, QuantityRaw qty_raw)
+
     cdef int64_t _last_reset_timestamp
     cdef int reset_seconds
+
+    cdef object _coupling_manager

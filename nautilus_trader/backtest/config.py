@@ -42,6 +42,7 @@ from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OtoTriggerMode
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
+from nautilus_trader.backtest.coupling_manager import CouplingInterval
 from nautilus_trader.persistence.funcs import parse_filters_expr
 from nautilus_trader.risk.config import RiskEngineConfig
 from nautilus_trader.system.config import NautilusKernelConfig
@@ -170,6 +171,8 @@ class BacktestVenueConfig(NautilusConfig, frozen=True):
     frozen_account: bool = False
     price_protection_points: NonNegativeInt = 0
     settlement_prices: dict[InstrumentId, float] | None = None
+    zone_coupling: bool = False
+    coupling_intervals: list[CouplingInterval] | None = None
 
 
 class BacktestDataConfig(NautilusConfig, frozen=True):
